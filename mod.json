@@ -1,17 +1,21 @@
 {
-	"geode": "$GEODE_VERSION",
-	"gd": {
-		"win": "2.2081",
-		"android": "2.2081",
-		"mac": "2.2081",
-		"ios": "2.2081"
-	},
-	"id": "$MOD_ID",
-	"name": "$MOD_NAME",
-	"version": "$MOD_VERSION",
-	"developer": "$MOD_DEVELOPER",
-	"description": "$MOD_DESCRIPTION",
-	"dependencies": {
-		"geode.node-ids": ">=v1.23.3"
-	}
+    "geode": "5.11.2",
+    "gd": {
+        "win": "2.2081"
+    },
+    "id": "sussy87th.ai-bridge",
+    "name": "AI Bridge",
+    "version": "v0.1.0",
+    "developer": "sussy87th",
+    "description": "Lockstep socket bridge so an external AI can play and train on levels.",
+    "settings": {
+        "port": {
+            "type": "int",
+            "name": "Port",
+            "description": "Localhost TCP port the trainer connects to. Restart the game after changing.",
+            "default": 5555,
+            "min": 1024,
+            "max": 65535
+        }
+    }
 }
