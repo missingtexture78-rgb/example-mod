@@ -3,16 +3,26 @@
 // Protocol (newline-terminated text, localhost only):
 //   mod -> trainer, every frame:
 //     "S px py yvel ground mode flipped percent n dx1 dy1 t1 ... dxn dyn tn"
-//   mod -> trainer, when the player dies:
-//     "D percent"
-//   trainer -> mod, in reply to every S line:
-//     "A 0" (release)  "A 1" (hold/click)  "R" (reset level)
-//   trainer -> mod, in reply to D:
-//     "R"
+//        mode: 0 cube 1 ship 2 ball 3 ufo 4 wave 5 robot 6 spider 7 swing
+//        t: 1 hazard, 2 solid
+//   mod -> trainer, when the player dies:   "D percent"
+//   trainer -> mod, reply to every S line:  "A 0" (release) / "A 1" (hold) / "R" (reset)
+//   trainer -> mod, reply to D:             "R"
 
+#include <Geode/Geode.hpp>
+#include <Geode/modify/PlayLayer.hpp>
+
+#include <atomic>
+#include <thread>
+#include <string>
+#include <vector>
+#include <sstream>
+#include <algorithm>
+
+// Geode already pulls in windows.h (which includes the old winsock.h),
+// so we use that header here instead of winsock2.h to avoid redefinition errors.
 #ifdef _WIN32
-    #include <winsock2.h>
-    #include <ws2tcpip.h>
+    #include <winsock.h>
     using sock_t = SOCKET;
     static constexpr sock_t BAD_SOCK = INVALID_SOCKET;
     static void closeSock(sock_t s) { closesocket(s); }
@@ -27,22 +37,12 @@
     static void closeSock(sock_t s) { close(s); }
 #endif
 
-#include <atomic>
-#include <thread>
-#include <string>
-#include <vector>
-#include <sstream>
-#include <algorithm>
-
-#include <Geode/Geode.hpp>
-#include <Geode/modify/PlayLayer.hpp>
-
 using namespace geode::prelude;
 
 namespace bridge {
     inline std::atomic<sock_t> client{BAD_SOCK};
     inline std::atomic<bool> newClient{false};
-    inline std::string buffer;
+    inline std::string buffer; // main thread only
 
     inline bool connected() { return client.load() != BAD_SOCK; }
 
@@ -51,7 +51,7 @@ namespace bridge {
         if (s != BAD_SOCK) closeSock(s);
     }
 
-    inline void poll() {
+    inline void checkNewClient() {
         if (newClient.exchange(false)) buffer.clear();
     }
 
@@ -61,13 +61,14 @@ namespace bridge {
         std::string out = line + "\n";
         size_t sent = 0;
         while (sent < out.size()) {
-            int n = send(s, out.data() + sent, static_cast<int>(out.size() - sent), 0);
+            int n = ::send(s, out.data() + sent, static_cast<int>(out.size() - sent), 0);
             if (n <= 0) { drop(); return false; }
             sent += static_cast<size_t>(n);
         }
         return true;
     }
 
+    // Blocks until a full line arrives. Returns false if the trainer disconnected.
     inline bool recvLine(std::string& out) {
         while (true) {
             auto pos = buffer.find('\n');
@@ -79,7 +80,7 @@ namespace bridge {
             auto s = client.load();
             if (s == BAD_SOCK) return false;
             char tmp[256];
-            int n = recv(s, tmp, sizeof(tmp), 0);
+            int n = ::recv(s, tmp, sizeof(tmp), 0);
             if (n <= 0) { drop(); return false; }
             buffer.append(tmp, static_cast<size_t>(n));
         }
@@ -90,27 +91,27 @@ namespace bridge {
         WSADATA wsa;
         WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
-        sock_t srv = socket(AF_INET, SOCK_STREAM, 0);
+        sock_t srv = ::socket(AF_INET, SOCK_STREAM, 0);
         if (srv == BAD_SOCK) { log::error("AI Bridge: socket() failed"); return; }
 
         int yes = 1;
-        setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes), sizeof(yes));
+        ::setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes), sizeof(yes));
 
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<uint16_t>(port));
-        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        addr.sin_port = htons(static_cast<unsigned short>(port));
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // 127.0.0.1 only
 
-        if (bind(srv, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 || listen(srv, 1) != 0) {
+        if (::bind(srv, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 || ::listen(srv, 1) != 0) {
             log::error("AI Bridge: could not listen on port {}", port);
             return;
         }
         log::info("AI Bridge listening on 127.0.0.1:{}", port);
 
         while (true) {
-            sock_t c = accept(srv, nullptr, nullptr);
+            sock_t c = ::accept(srv, nullptr, nullptr);
             if (c == BAD_SOCK) continue;
-            setsockopt(c, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&yes), sizeof(yes));
+            ::setsockopt(c, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&yes), sizeof(yes));
             drop();
             newClient.store(true);
             client.store(c);
@@ -127,7 +128,7 @@ $on_mod(Loaded) {
     bridge::start(static_cast<int>(Mod::get()->getSettingValue<int64_t>("port")));
 }
 
-constexpr float kLookahead = 400.f;
+constexpr float kLookahead = 400.f; // game units (30 = one block)
 constexpr size_t kMaxObjects = 8;
 constexpr float kFixedDt = 1.f / 60.f;
 
@@ -194,7 +195,7 @@ class $modify(AIPlayLayer, PlayLayer) {
     }
 
     void update(float dt) {
-        bridge::poll();
+        bridge::checkNewClient();
         if (!bridge::connected()) {
             PlayLayer::update(dt);
             return;
